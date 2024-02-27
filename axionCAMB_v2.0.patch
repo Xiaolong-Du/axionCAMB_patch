@@ -1,0 +1,571 @@
+diff --git a/equations_ppf.f90 b/equations_ppf.f90
+index aea33ea..38d99ef 100644
+--- a/equations_ppf.f90
++++ b/equations_ppf.f90
+@@ -435,6 +435,8 @@ omegah2_rad=((CP%TCMB**4.0d0)/(rhocrit))/(c**2.0d0)
+ 
+         integer E_ix, B_ix !tensor polarization indices
+         real(dl) denlkt(4,max_l_evolve),Kft(max_l_evolve)
++
++        real, pointer :: OutputTransfer(:) => null()
+     end type EvolutionVars
+ 
+     !precalculated arrays
+@@ -1161,10 +1163,11 @@ omegah2_rad=((CP%TCMB**4.0d0)/(rhocrit))/(c**2.0d0)
+ 
+     end subroutine SwitchToMassiveNuApprox
+ 
+-    subroutine MassiveNuVarsOut(EV,y,yprime,a,grho,gpres,dgrho,dgq,dgpi, gdpi_diff,pidot_sum)
++    subroutine MassiveNuVarsOut(EV,y,yprime,a,grho,gpres,dgrho,dgq,dgpi,dgpi_diff,pidot_sum,clxnu_all)
+     implicit none
+     type(EvolutionVars) EV
+-    real(dl) :: y(EV%nvar), yprime(EV%nvar),a, grho,gpres,dgrho,dgq,dgpi, gdpi_diff,pidot_sum
++    real(dl) :: y(EV%nvar), yprime(EV%nvar),a
++    real(dl), optional :: grho,gpres,dgrho,dgq,dgpi,dgpi_diff,pidot_sum,clxnu_all
+     !grho = a^2 kappa rho
+     !gpres = a^2 kappa p
+     !dgrho = a^2 kappa \delta\rho
+@@ -1176,9 +1179,11 @@ omegah2_rad=((CP%TCMB**4.0d0)/(rhocrit))/(c**2.0d0)
+     integer nu_i
+     real(dl) pinudot,grhormass_t, rhonu, pnu,  rhonudot
+     real(dl) adotoa, grhonu_t,gpnu_t
+-    real(dl) clxnu, qnu, pinu, dpnu
++    real(dl) clxnu, qnu, pinu, dpnu, grhonu, dgrhonu
+     real(dl) dtauda
+ 
++    grhonu=0
++    dgrhonu=0
+     do nu_i = 1, CP%Nu_mass_eigenstates
+         grhormass_t=grhormass(nu_i)/a**2
+ 
+@@ -1209,15 +1214,18 @@ omegah2_rad=((CP%TCMB**4.0d0)/(rhocrit))/(c**2.0d0)
+         grhonu_t=grhormass_t*rhonu
+         gpnu_t=grhormass_t*pnu
+ 
+-        grho = grho  + grhonu_t
+-        gpres= gpres + gpnu_t
++        grhonu = grhonu  + grhonu_t
++        if (present(gpres)) gpres= gpres + gpnu_t
+ 
+-        dgrho= dgrho + grhonu_t*clxnu
+-        dgq  = dgq   + grhonu_t*qnu
+-        dgpi = dgpi  + grhonu_t*pinu
+-        gdpi_diff = gdpi_diff + pinu*(3*gpnu_t-grhonu_t)
+-        pidot_sum = pidot_sum + grhonu_t*pinudot
++        dgrhonu= dgrhonu + grhonu_t*clxnu
++        if (present(dgq)) dgq  = dgq   + grhonu_t*qnu
++        if (present(dgpi)) dgpi = dgpi  + grhonu_t*pinu
++        if (present(dgpi_diff)) dgpi_diff = dgpi_diff + pinu*(3*gpnu_t-grhonu_t)
++        if (present(pidot_sum)) pidot_sum = pidot_sum + grhonu_t*pinudot
+     end do
++    if (present(grho)) grho = grho  + grhonu
++    if (present(dgrho)) dgrho= dgrho + dgrhonu
++    if (present(clxnu_all)) clxnu_all = dgrhonu/grhonu
+ 
+     end subroutine MassiveNuVarsOut
+ 
+@@ -2003,6 +2011,8 @@ grhoax_t=dorp*a2
+ 		double precision ho_out,a0_out,b0_out,Konstant
+ 		double precision H_eV
+ 
++    nullify(EV%OutputTransfer) !Should not be needed, but avoids issues in ifort 14
++
+ 				!get hubble in units of eV in terms of standarf formula
+ 		H_eV=1.d14*6.5821d-27*dble(CP%H0)/(MPC_in_sec*c)
+ 
+@@ -2430,100 +2440,27 @@ grhoax_t=dorp*a2
+     use Transfer
+     implicit none
+     type(EvolutionVars) EV
+-    
+-    real(dl) clxc, clxb, clxg, clxr, k,k2
+-    real(dl) grho,gpres,dgrho,dgq,a
+-    real Arr(:)
+-    real(dl) y(EV%nvar)
+-    real(dl) growth,clxtot !DM: growth vars, clxtot is unnecessary, just needs a name
+-    real(dl) tau
+-    real(dl) dorp
+-    real(dl) gr
+-    real(dl) clxax,grhoax_t
+-    
+-    integer i	
+-    
++    real(dl), intent(in) :: tau
++    real, target :: Arr(:)
++    real(dl) y(EV%nvar), yprime(EV%nvar)
++
++    real(dl) growth, clxtot, k, k2, a
++
+     a    = y(1)
+-    clxc = y(3)
+-    clxb = y(4)
+-    if (EV%no_nu_multpoles) then
+-       clxr=0
+-    else
+-       clxr = y(EV%r_ix)
+-    end if
+-    
+-    if (EV%no_phot_multpoles) then
+-       clxg=0
+-    else
+-       clxg = y(EV%g_ix)
+-    end if
+-    
+     k    = EV%k_buf
+     k2   = EV%k2_buf
+-    ! Axions
+-    clxax=y(EV%a_ix)
+-    
+-    if (a .lt. CP%a_osc) then
+-       call spline_out(CP%loga_table,CP%grhoax_table,CP%grhoax_table_buff,ntable,dlog10(a),gr)
+-       !write(*,*) a, gr
+-       !compute log10 of density use of interpolation
+-       !print*,a,grhoc,grhom*(1.0d1**(dble(gr)))/((grhoc+grhob)/(a**3.0d0))
+-       if (gr .eq. gr) then
+-          !delog it and multiply by physical units
+-          dorp=grhom*(1.0d1**(dble(gr)))
+-       else
+-          dorp=0.0d0
+-       endif
+-    else
+-       dorp=grhom*CP%drefp_hsq*((CP%a_osc/a)**3.0d0)
+-        
+-    endif
+-    grhoax_t=dorp*(a**2.0d0)
+-    Arr(Transfer_kh) = k/(CP%h0/100._dl)
+-    Arr(Transfer_cdm) = clxc/k2
+-    Arr(Transfer_b) = clxb/k2
+-    Arr(Transfer_g) = clxg/k2
+-    Arr(Transfer_r) = clxr/k2
+-    Arr(Transfer_axion) = clxax/k2
+-    
+-    dgrho = 0
+-    grho =  0
+-    
+-    if (CP%Num_Nu_Massive > 0) then
+-       call MassiveNuVars(EV,y,a,grho,gpres,dgrho,dgq)
+-       Arr(Transfer_nu) = dgrho/grho/k2
+-    else
+-       Arr(Transfer_nu) = 0
+-    end if
+-    
+-    !If we want DE perturbations to get \delta\rho/\rho_m    
+-    !dgrho=dgrho+y(EV%w_ix)*grhov*a**(-1-3*w_lam)
+-    !Arr(Transfer_r) = y(EV%w_ix)/k2
+-    
+-    !dgrho = dgrho+(clxc*grhoc + clxb*grhob)/a 
+-    !grho =  grho+(grhoc+grhob)/a + grhov*a**(-1-3*w_lam)
+-    
+-    ! DM: only include axions if they are clustered: a_osc kluge for bias as in Hlozek et al 2015. Be careful when a_osc.ge.1
+-    !! DM16: this modification with ma\geq 1e-25 eV to treat axions in non-linear lensing S4 fiducial model.
+-    ! See additional changes in halofit, and check for consistency.
+-    
+-    !if (a_osc.lt.CP%aeq) then
+-    if (CP%ma.ge.1.e-25) then
+-       dgrho = dgrho+(clxc*grhoc + clxb*grhob)/a+grhoax_t*clxax
+-       grho =  grho+(grhoc+grhob)/a+grhoax_t
+-    else
+-       !	write(*,*)'axions are not clustering in P(k)'
+-       dgrho = dgrho+(clxc*grhoc + clxb*grhob)/a
+-       grho =  grho+(grhoc+grhob)/a
+-    end if
+-    
+-    ! DM: output the growth rate
+-    
+-    call GrowthRate(EV,y,tau,k,a,growth,clxtot)
+-    Arr(Transfer_f) = growth
+-    Arr(Transfer_tot) = dgrho/grho/k2
+-    
+     
++    yprime = 0
++    EV%OutputTransfer =>  Arr
++    call derivs(EV,EV%ScalEqsToPropagate,tau,y,yprime)
++    nullify(EV%OutputTransfer)
++
++    !! DM: output the growth rate    
++    !call GrowthRate(EV,y,tau,k,a,growth,clxtot)
++    !Arr(Transfer_f) = growth
++
++    Arr(Transfer_kh+1:Transfer_max) = Arr(Transfer_kh+1:Transfer_max)/EV%k2_buf    
++
+     end subroutine outtransf
+ 
+     !cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+@@ -2568,6 +2505,30 @@ grhoax_t=dorp*a2
+         real(dl) dorp
+         real(dl) gr,mnorm
+ 
++    real(dl) phi, dgpi, dgpi_diff, pidot_sum, clxnu, dgrho_matter, grho_matter, &
++             gpres_nu, grhonu_t
++
++!    !!Flag for axion transfer function
++!    integer, parameter :: Transfer_kh =1, Transfer_cdm=2,Transfer_b=3,Transfer_g=4, &
++!        Transfer_r=5, Transfer_nu = 6,  & !massless and massive neutrino
++!        Transfer_axion=7,  Transfer_f=8, & ! DM: Axions and growth rate     
++!        Transfer_tot=9, Transfer_Weyl = 10, & ! the Weyl potential, for lensing and ISW
++!        Transfer_Newt_vel_axion=11, Transfer_Newt_vel_baryon=12,   & ! -k v_Newtonian/H
++!        Transfer_vel_baryon_axion = 13 !relative velocity of baryons and CDM
++
++    !Flag for axion transfer function
++!    integer, parameter :: Transfer_kh =1, Transfer_cdm=2, Transfer_axion=3, Transfer_b=4, Transfer_g=5, &
++!        Transfer_r=6, Transfer_nu = 7,  & !massless and massive neutrino
++!        Transfer_tot=8, Transfer_nonu=9, Transfer_tot_de=10, Transfer_Weyl=11, &
++!        Transfer_Newt_vel_cdm=12, Transfer_Newt_vel_axion=13, Transfer_Newt_vel_baryon=14, &
++!        Transfer_vel_baryon_cdm=15, Transfer_vel_baryon_axion=16
++
++    !Flag for axion transfer function
++    integer, parameter :: Transfer_kh =1, Transfer_axion=2, Transfer_b=3, Transfer_g=4, &
++        Transfer_r=5, Transfer_nu = 6,  & !massless and massive neutrino
++        Transfer_tot=7, Transfer_nonu=8, Transfer_tot_de=9, Transfer_Weyl=10, &
++        Transfer_Newt_vel_axion=11, Transfer_Newt_vel_baryon=12, &
++        Transfer_vel_baryon_axion=13
+         
+     k=EV%k_buf
+     k2=EV%k2_buf
+@@ -2641,11 +2602,6 @@ grhoax_t=dorp*a2
+         call thermo(tau,cs2,opacity)
+     end if
+ 
+-    
+-        gpres=gpres_ax
+-        grho=grhob_t+grhoc_t+grhor_t+grhog_t+grhov_t+grhoax_t
+-
+-                
+         mnorm=2.0d0*EV%m_ax*a*CP%H0*1.d3/(c)
+         
+         csquared_ax=((k/mnorm)**2.0d0)/(1.0d0+(k/mnorm)**2.0d0)
+@@ -2659,11 +2615,23 @@ grhoax_t=dorp*a2
+         !switch 9/22 v_ax*(1+w_ax) as the axion momentum variable to avoid infinities
+         dgq=grhob_t*vb+grhoax_t*v_ax
+                 
++    gpres_nu=0
++    grhonu_t=0
+ 
+     if (CP%Num_Nu_Massive > 0) then
+-        call MassiveNuVars(EV,ay,a,grho,gpres,dgrho,dgq, wnu_arr)
++        !call MassiveNuVars(EV,ay,a,grho,gpres,dgrho,dgq, wnu_arr)
++        call MassiveNuVars(EV,ay,a,grhonu_t,gpres_nu,dgrho,dgq,wnu_arr)
+     end if
+ 
++    ! massive neutrions + baryon + CDM + axion
++    grho_matter = grhonu_t+grhob_t+grhoc_t+grhoax_t
++    ! + massless neutrinos + photons + dark energy
++    grho = grho_matter+grhor_t+grhog_t+grhov_t
++
++    ! massive neutrions + axion
++    gpres = gpres_nu + gpres_ax
++    !gpres = gpres_nu + gpres_ax + (grhor_t + grhog_t)/3
++
+     if (CP%flat) then
+         adotoa=sqrt(grho/3)
+         cothxor=1._dl/tau
+@@ -2672,6 +2640,8 @@ grhoax_t=dorp*a2
+         cothxor=1._dl/tanfunc(tau/CP%r)/CP%r
+     end if
+ 
++    dgrho_matter = dgrho
++
+     ! if (w_lam /= -1 .and. w_Perturb) then
+     !    clxq=ay(EV%w_ix)
+     !    vq=ay(EV%w_ix+1)
+@@ -2979,62 +2949,117 @@ grhoax_t=dorp*a2
+     end if ! no_nu_multpoles
+ 
+     !  Massive neutrino equations of motion.
+-    if (CP%Num_Nu_massive == 0) return
+-
+-    do nu_i = 1, CP%Nu_mass_eigenstates
+-        if (EV%MassiveNuApprox(nu_i)) then
+-            !Now EV%iq0 = clx, EV%iq0+1 = clxp, EV%iq0+2 = G_1, EV%iq0+3=G_2=pinu
+-            !see astro-ph/0203507
+-            G11_t=EV%G11(nu_i)/a/a2
+-            G30_t=EV%G30(nu_i)/a/a2
+-            off_ix = EV%nu_ix(nu_i)
+-            w=wnu_arr(nu_i)
+-            ayprime(off_ix)=-k*z*(w+1) + 3*adotoa*(w*ay(off_ix) - ay(off_ix+1))-k*ay(off_ix+2)
+-            ayprime(off_ix+1)=(3*w-2)*adotoa*ay(off_ix+1) - 5._dl/3*k*z*w - k/3*G11_t
+-            ayprime(off_ix+2)=(3*w-1)*adotoa*ay(off_ix+2) - k*(2._dl/3*EV%Kf(1)*ay(off_ix+3)-ay(off_ix+1))
+-            ayprime(off_ix+3)=(3*w-2)*adotoa*ay(off_ix+3) + 2*w*k*sigma - k/5*(3*EV%Kf(2)*G30_t-2*G11_t)
+-        else
+-            ind=EV%nu_ix(nu_i)
+-            do i=1,EV%nq(nu_i)
+-                q=nu_q(i)
+-                aq=a*nu_masses(nu_i)/q
+-                v=1._dl/sqrt(1._dl+aq*aq)
+-
+-                ayprime(ind)=-k*(4._dl/3._dl*z + v*ay(ind+1))
+-                ind=ind+1
+-                ayprime(ind)=v*(EV%denlk(1)*ay(ind-1)-EV%denlk2(1)*ay(ind+1))
+-                ind=ind+1
+-                if (EV%lmaxnu_tau(nu_i)==2) then
+-                    ayprime(ind)=-ayprime(ind-2) -3*cothxor*ay(ind)
+-                else
+-                    ayprime(ind)=v*(EV%denlk(2)*ay(ind-1)-EV%denlk2(2)*ay(ind+1)) &
+-                    +k*8._dl/15._dl*sigma
+-                    do l=3,EV%lmaxnu_tau(nu_i)-1
+-                        ind=ind+1
+-                        ayprime(ind)=v*(EV%denlk(l)*ay(ind-1)-EV%denlk2(l)*ay(ind+1))
+-                    end do
+-                    !  Truncate moment expansion.
+-                    ind = ind+1
+-                    ayprime(ind)=k*v*ay(ind-1)-(EV%lmaxnu_tau(nu_i)+1)*cothxor*ay(ind)
+-                end if
+-                ind = ind+1
+-            end do
+-        end if
+-    end do
+-
+-    if (EV%has_nu_relativistic) then
+-        ind=EV%nu_pert_ix
+-        ayprime(ind)=+k*a2*qr -k*ay(ind+1)
+-        ind2= EV%r_ix
+-        do l=1,EV%lmaxnu_pert-1
+-            ind=ind+1
+-            ind2=ind2+1
+-            ayprime(ind)= -a2*(EV%denlk(l)*ay(ind2-1)-EV%denlk2(l)*ay(ind2+1)) &
+-            +   (EV%denlk(l)*ay(ind-1)-EV%denlk2(l)*ay(ind+1))
+-        end do
+-        ind=ind+1
+-        ind2=ind2+1
+-        ayprime(ind)= k*(ay(ind-1) -a2*ay(ind2-1)) -(EV%lmaxnu_pert+1)*cothxor*ay(ind)
++    if (CP%Num_Nu_massive > 0) then
++       do nu_i = 1, CP%Nu_mass_eigenstates
++           if (EV%MassiveNuApprox(nu_i)) then
++               !Now EV%iq0 = clx, EV%iq0+1 = clxp, EV%iq0+2 = G_1, EV%iq0+3=G_2=pinu
++               !see astro-ph/0203507
++               G11_t=EV%G11(nu_i)/a/a2
++               G30_t=EV%G30(nu_i)/a/a2
++               off_ix = EV%nu_ix(nu_i)
++               w=wnu_arr(nu_i)
++               ayprime(off_ix)=-k*z*(w+1) + 3*adotoa*(w*ay(off_ix) - ay(off_ix+1))-k*ay(off_ix+2)
++               ayprime(off_ix+1)=(3*w-2)*adotoa*ay(off_ix+1) - 5._dl/3*k*z*w - k/3*G11_t
++               ayprime(off_ix+2)=(3*w-1)*adotoa*ay(off_ix+2) - k*(2._dl/3*EV%Kf(1)*ay(off_ix+3)-ay(off_ix+1))
++               ayprime(off_ix+3)=(3*w-2)*adotoa*ay(off_ix+3) + 2*w*k*sigma - k/5*(3*EV%Kf(2)*G30_t-2*G11_t)
++           else
++               ind=EV%nu_ix(nu_i)
++               do i=1,EV%nq(nu_i)
++                   q=nu_q(i)
++                   aq=a*nu_masses(nu_i)/q
++                   v=1._dl/sqrt(1._dl+aq*aq)
++
++                   ayprime(ind)=-k*(4._dl/3._dl*z + v*ay(ind+1))
++                   ind=ind+1
++                   ayprime(ind)=v*(EV%denlk(1)*ay(ind-1)-EV%denlk2(1)*ay(ind+1))
++                   ind=ind+1
++                   if (EV%lmaxnu_tau(nu_i)==2) then
++                       ayprime(ind)=-ayprime(ind-2) -3*cothxor*ay(ind)
++                   else
++                       ayprime(ind)=v*(EV%denlk(2)*ay(ind-1)-EV%denlk2(2)*ay(ind+1)) &
++                       +k*8._dl/15._dl*sigma
++                       do l=3,EV%lmaxnu_tau(nu_i)-1
++                           ind=ind+1
++                           ayprime(ind)=v*(EV%denlk(l)*ay(ind-1)-EV%denlk2(l)*ay(ind+1))
++                       end do
++                       !  Truncate moment expansion.
++                       ind = ind+1
++                       ayprime(ind)=k*v*ay(ind-1)-(EV%lmaxnu_tau(nu_i)+1)*cothxor*ay(ind)
++                   end if
++                   ind = ind+1
++               end do
++           end if
++       end do
++
++       if (EV%has_nu_relativistic) then
++           ind=EV%nu_pert_ix
++           ayprime(ind)=+k*a2*qr -k*ay(ind+1)
++           ind2= EV%r_ix
++           do l=1,EV%lmaxnu_pert-1
++               ind=ind+1
++               ind2=ind2+1
++               ayprime(ind)= -a2*(EV%denlk(l)*ay(ind2-1)-EV%denlk2(l)*ay(ind2+1)) &
++               +   (EV%denlk(l)*ay(ind-1)-EV%denlk2(l)*ay(ind+1))
++           end do
++           ind=ind+1
++           ind2=ind2+1
++           ayprime(ind)= k*(ay(ind-1) -a2*ay(ind2-1)) -(EV%lmaxnu_pert+1)*cothxor*ay(ind)
++       end if
++    end if
++
++    if (associated(EV%OutputTransfer)) then
++       dgpi  = grhor_t*pir + grhog_t*pig
++       dgpi_diff = 0  !sum (3*p_nu -rho_nu)*pi_nu
++       pidot_sum = grhog_t*pigdot + grhor_t*pirdot
++       clxnu = 0
++       if (CP%Num_Nu_Massive > 0) then
++          call MassiveNuVarsOut(EV,ay,ayprime,a,dgpi=dgpi,dgpi_diff=dgpi_diff,pidot_sum=pidot_sum,clxnu_all=clxnu)
++       end if
++       phi = -((dgrho +3*dgq*adotoa/k)/EV%Kf(1) + dgpi)/(2*k2)
++
++       ! DM: only include axions if they are clustered: a_osc kluge for bias as in
++       ! Hlozek et al 2015. Be careful when a_osc.ge.1
++       !! DM16: this modification with ma\geq 1e-25 eV to treat axions in
++       !non-linear lensing S4 fiducial model.
++       ! See additional changes in halofit, and check for consistency.
++       !if (a_osc.lt.CP%aeq) then
++       if (CP%ma < 1.e-25) then
++          dgrho_matter = dgrho_matter - grhoax_t*clxax
++          grho_matter = grho_matter - grhoax_t
++ 
++          dgrho = dgrho - grhoax_t*clxax
++          grho  = grho  - grhoax_t
++       end if
++
++       EV%OutputTransfer(Transfer_kh) = k/(CP%h0/100._dl)
++       !EV%OutputTransfer(Transfer_cdm) = clxc
++       EV%OutputTransfer(Transfer_axion) = clxax
++       EV%OutputTransfer(Transfer_b) = clxb
++       EV%OutputTransfer(Transfer_g) = clxg
++       EV%OutputTransfer(Transfer_r) = clxr
++       EV%OutputTransfer(Transfer_nu) = clxnu
++       ! massive neutrions + baryon + CDM + axion
++       EV%OutputTransfer(Transfer_tot) =  dgrho_matter/grho_matter !includes neutrinos
++       ! baryon + CDM + axion
++       if (CP%ma.ge.1.e-25) then
++          EV%OutputTransfer(Transfer_nonu) = (grhob_t*clxb+grhoc_t*clxc+grhoax_t*clxax)/(grhob_t + grhoc_t + grhoax_t)
++       else
++          EV%OutputTransfer(Transfer_nonu) = (grhob_t*clxb+grhoc_t*clxc)/(grhob_t + grhoc_t)
++       end if
++       ! massive neutrions + baryon + CDM + axion + massless neutrions + photons + dark energy
++       EV%OutputTransfer(Transfer_tot_de) =  dgrho/grho_matter
++       !Transfer_Weyl is k^2Phi, where Phi is the Weyl potential
++       EV%OutputTransfer(Transfer_Weyl) = k2*phi
++       !! Newtonian-gauge CDM velocity
++       !EV%OutputTransfer(Transfer_Newt_vel_cdm) =  -k*sigma/adotoa
++       ! Newtonian-gauge axion velocity
++       EV%OutputTransfer(Transfer_Newt_vel_axion) = -k*(v_ax + sigma)/adotoa
++       ! Newtonian-gauge baryon velocity
++       EV%OutputTransfer(Transfer_Newt_vel_baryon) = -k*(vb  + sigma)/adotoa
++       ! Relative baryon-CDM velocity 
++       !EV%OutputTransfer(Transfer_vel_baryon_cdm) = vb
++       ! Relative baryon-axion velocity
++       EV%OutputTransfer(Transfer_vel_baryon_axion) = vb-v_ax
+     end if
+ 
+     end subroutine derivs
+diff --git a/inidriver_axion.F90 b/inidriver_axion.F90
+index 08b5c3e..e17eeec 100644
+--- a/inidriver_axion.F90
++++ b/inidriver_axion.F90
+@@ -172,13 +172,13 @@ integer badflag
+ !       print*, 'This is Hinflation renee', P%Hinf
+        P%axion_isocurvature = Ini_Read_Logical('axion_isocurvature', .true.)
+        
+-      else
++    else
+ 
+        P%omegab = Ini_Read_Double('omega_baryon')
+        P%omegac = Ini_Read_Double('omega_cdm')
+        P%omegav = Ini_Read_Double('omega_lambda')
+        P%omegan = Ini_Read_Double('omega_neutrino')
+-       P%omegaax = Ini_Read_Double('omega_axion')/(P%H0/100)**2
++       P%omegaax = Ini_Read_Double('omega_axion')
+        P%ma     = Ini_Read_Double('m_ax')  
+ 
+        
+diff --git a/modules.f90 b/modules.f90
+index 18d8eb7..97bcfcf 100644
+--- a/modules.f90
++++ b/modules.f90
+@@ -1720,13 +1720,46 @@ CP%Nu_massless_degeneracy=nu_massless_degeneracy
+     use Errors
+     implicit none
+     public
+-    !!Flag for axion transfer function
+-    integer, parameter :: Transfer_kh =1, Transfer_cdm=2,Transfer_b=3,Transfer_g=4, &
+-    Transfer_r=5, Transfer_nu = 6,  & !massless and massive neutrino
+-    Transfer_axion=7,  Transfer_f=8, & ! DM: Axions and growth rate     
+-    Transfer_tot=9
+-
+-    integer, parameter :: Transfer_max = Transfer_tot
++    !!!Flag for axion transfer function
++    !integer, parameter :: Transfer_kh =1, Transfer_cdm=2,Transfer_b=3,Transfer_g=4, &
++    !Transfer_r=5, Transfer_nu = 6,  & !massless and massive neutrino
++    !Transfer_axion=7,  Transfer_f=8, & ! DM: Axions and growth rate     
++    !Transfer_tot=9
++
++!    !!Flag for axion transfer function
++!    integer, parameter :: Transfer_kh =1, Transfer_cdm=2,Transfer_b=3,Transfer_g=4, &
++!        Transfer_r=5, Transfer_nu = 6,  & !massless and massive neutrino
++!        Transfer_axion=7,  Transfer_f=8, & ! DM: Axions and growth rate     
++!        Transfer_tot=9, Transfer_Weyl = 10, & ! the Weyl potential, for lensing and ISW
++!        Transfer_Newt_vel_axion=11, Transfer_Newt_vel_baryon=12,   & ! -k v_Newtonian/H
++!        Transfer_vel_baryon_axion = 13 !relative velocity of baryons and CDM
++
++    !Flag for axion transfer function
++!    integer, parameter :: Transfer_kh =1, Transfer_cdm=2, Transfer_axion=3, Transfer_b=4, Transfer_g=5, &
++!        Transfer_r=6, Transfer_nu = 7,  & !massless and massive neutrino
++!        Transfer_tot=8, Transfer_nonu=9, Transfer_tot_de=10, Transfer_Weyl=11, &
++!        Transfer_Newt_vel_cdm=12, Transfer_Newt_vel_axion=13, Transfer_Newt_vel_baryon=14, &
++!        Transfer_vel_baryon_cdm=15, Transfer_vel_baryon_axion=16
++
++    integer, parameter :: Transfer_kh =1, Transfer_axion=2, Transfer_b=3, Transfer_g=4, &
++        Transfer_r=5, Transfer_nu = 6,  & !massless and massive neutrino
++        Transfer_tot=7, Transfer_nonu=8, Transfer_tot_de=9, Transfer_Weyl=10, &
++        Transfer_Newt_vel_axion=11, Transfer_Newt_vel_baryon=12, &
++        Transfer_vel_baryon_axion=13
++
++    !integer, parameter :: Transfer_max = Transfer_tot
++    integer, parameter :: Transfer_max = Transfer_vel_baryon_axion
++
++    integer, parameter :: name_tag_len = 12
++    !character(LEN=name_tag_len) :: Transfer_name_tags(Transfer_max-1) = &
++    !     ['CDM     ', 'axion   ', 'baryon  ', 'photon  ', 'nu      ', 'mass_nu ', 'total   ', &
++    !     'no_nu   ', 'total_de', 'Weyl    ', 'v_CDM   ', 'v_axion ', 'v_b     ', 'v_b-v_c ',  &
++    !     'v_b-v_a ']
++
++    character(LEN=name_tag_len) :: Transfer_name_tags(Transfer_max-1) = &
++        ['axion   ', 'baryon  ', 'photon  ', 'nu      ', 'mass_nu ', 'total   ', &
++        'no_nu   ', 'total_de', 'Weyl    ', 'v_axion ', 'v_b     ',  &
++        'v_b-v_a ']
+ 
+     logical :: transfer_interp_matterpower  = .true. !output regular grid in log k
+     !set to false to output calculated values for later interpolation
+@@ -2207,15 +2240,18 @@ CP%Nu_massless_degeneracy=nu_massless_degeneracy
+     character(LEN=Ini_max_string_len), intent(IN) :: FileNames(*)
+     !JD 08/13 Changes in here to PK arrays and variables
+     integer i_PK
++    integer unit
+ 
+     do i_PK=1, CP%Transfer%PK_num_redshifts
+         if (FileNames(i_PK) /= '') then
+             i = CP%Transfer%PK_redshifts_index(i_PK)
+-            open(unit=fileio_unit,file=FileNames(i_PK),form='formatted',status='replace')
++            !open(unit=fileio_unit,file=FileNames(i_PK),form='formatted',status='replace')
++            unit = open_file_header(FileNames(i_PK), 'k/h', transfer_name_tags, 14)
+             do ik=1,MTrans%num_q_trans
+                 if (MTrans%TransferData(Transfer_kh,ik,i)/=0) then
+ !                    write(fileio_unit,'(7E14.6)') MTrans%TransferData(Transfer_kh:Transfer_max,ik,i)
+-                    write(fileio_unit,'(9E14.6)') MTrans%TransferData(Transfer_kh:Transfer_max,ik,i) ! axion
++                    !write(fileio_unit,'(9E14.6)') MTrans%TransferData(Transfer_kh:Transfer_max,ik,i) ! axion
++                    write(unit,'(*(E15.6))') abs(MTrans%TransferData(Transfer_kh:Transfer_max,ik,i))
+                 end if
+             end do
+             close(fileio_unit)
+@@ -2225,6 +2261,27 @@ CP%Nu_massless_degeneracy=nu_massless_degeneracy
+ 
+     end subroutine Transfer_SaveToFiles
+ 
++    function open_file_header(filename, Col1, Columns, n) result(unit)
++    character(LEN=*), intent(in) :: filename
++    character(LEN=*), intent(in) :: col1
++    character(LEN=name_tag_len), intent(in) :: Columns(:)
++    integer, intent(in), optional :: n
++    integer :: unit, nn
++
++    !nn = PresentDefault(6, n)
++    if (present(n)) then
++       nn = n
++    else
++       nn = 6
++    end if
++
++    open(newunit=unit,file=filename,form='formatted',status='replace')
++!    if (output_file_headers) then
++        write(unit,'("#",1A'//Trim(IntToStr(nn-1))//'," ",*(A15))') Col1, Columns
++!    end if
++
++    end function open_file_header
++
+     subroutine Transfer_SaveMatterPower(MTrans, FileNames)
+     use IniFile
+     !Export files of total  matter power spectra in h^{-1} Mpc units, against k/h.
