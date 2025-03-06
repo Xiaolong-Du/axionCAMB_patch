@@ -14,4 +14,4 @@ For axionCAMB v2.0, run
 ```
 git apply axionCAMB_v2.0.patch
 ```
-If you use this patch in your work, we kindly ask you to cite the original axionCAMB code: [http://arxiv.org/abs/1410.2896](http://arxiv.org/abs/1410.2896) and the following paper (link to be added).
+If you use this patch in your work, we kindly ask you to cite the original axionCAMB code: [http://arxiv.org/abs/1410.2896](http://arxiv.org/abs/1410.2896) and the following paper [https://arxiv.org/abs/2410.03635](https://arxiv.org/abs/2410.03635).
